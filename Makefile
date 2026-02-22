@@ -51,17 +51,25 @@ run: build
 	@echo "Running ${BINARY_NAME}..."
 	./${BINARY_NAME}
 
-# OAuth authorization
+# OAuth authorization (auto-loads .env.local if exists)
 auth:
 	@echo "Starting OAuth helper..."
-	@echo "Make sure WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET are set"
-	go run cmd/auth/main.go
+	@if [ -f .env.local ]; then \
+		echo "Loading credentials from .env.local"; \
+		. ./.env.local && go run cmd/auth/main.go; \
+	else \
+		echo "No .env.local found. Set WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET manually."; \
+		go run cmd/auth/main.go; \
+	fi
 
-# Verify token
+# Verify token (auto-loads .env.local if exists)
 verify:
 	@echo "Verifying WHOOP token..."
-	@echo "Make sure WHOOP_ACCESS_TOKEN is set"
-	go run cmd/verify/main.go
+	@if [ -f .env.local ]; then \
+		. ./.env.local && go run cmd/verify/main.go; \
+	else \
+		go run cmd/verify/main.go; \
+	fi
 
 # CI pipeline (run all checks)
 ci: fmt lint test build
