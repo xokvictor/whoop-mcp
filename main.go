@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/xokvictor/whoop-mcp/pkg/auth"
 	"github.com/xokvictor/whoop-mcp/pkg/whoop"
 )
 
@@ -23,12 +25,32 @@ func main() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
-	// Initialize WHOOP client
-	client := whoop.NewClient()
+	// Get OAuth credentials from environment
+	clientID := os.Getenv("WHOOP_CLIENT_ID")
+	clientSecret := os.Getenv("WHOOP_CLIENT_SECRET")
+
+	// Initialize TokenManager if credentials are available
+	var tokenManager *auth.TokenManager
+	if clientID != "" && clientSecret != "" {
+		var err error
+		tokenManager, err = auth.NewTokenManager(clientID, clientSecret)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize token manager: %v", err)
+		}
+	}
+
+	// Initialize WHOOP client with token provider
+	envToken := os.Getenv("WHOOP_ACCESS_TOKEN")
+	var client *whoop.Client
+	if tokenManager != nil {
+		client = whoop.NewClientWithTokenProvider(envToken, tokenManager)
+	} else {
+		client = whoop.NewClientWithToken(envToken)
+	}
 
 	// Validate token on startup
 	if !client.HasToken() {
-		log.Println("Warning: WHOOP_ACCESS_TOKEN not set. API calls will fail.")
+		log.Println("Warning: No authentication configured. Set WHOOP_ACCESS_TOKEN or WHOOP_CLIENT_ID/WHOOP_CLIENT_SECRET.")
 	}
 
 	// Create MCP server
@@ -41,6 +63,7 @@ func main() {
 
 	// Register tools
 	registerTools(s, client)
+	registerAuthTools(s, tokenManager, clientID, clientSecret)
 
 	// Register OAuth configuration resource
 	registerResources(s)
@@ -426,4 +449,114 @@ func resultFromJSON(data interface{}) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultError(fmt.Sprintf("Serialization error: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(jsonData)), nil
+}
+
+func registerAuthTools(s *server.MCPServer, tokenManager *auth.TokenManager, clientID, clientSecret string) {
+	// Auth status tool
+	s.AddTool(
+		mcp.NewTool("whoop_auth_status",
+			mcp.WithDescription("Check the current WHOOP authentication status. Returns whether you're authenticated, token expiry time, and token file location."),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			status := map[string]interface{}{
+				"authenticated": false,
+				"method":        "none",
+			}
+
+			// Check environment variable first
+			if os.Getenv("WHOOP_ACCESS_TOKEN") != "" {
+				status["authenticated"] = true
+				status["method"] = "environment_variable"
+				status["note"] = "Using WHOOP_ACCESS_TOKEN environment variable"
+				return resultFromJSON(status)
+			}
+
+			// Check token file
+			if tokenManager == nil {
+				status["error"] = "Token manager not initialized. Set WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET."
+				return resultFromJSON(status)
+			}
+
+			token, err := tokenManager.Load()
+			if err != nil {
+				status["error"] = fmt.Sprintf("Error loading token: %v", err)
+				return resultFromJSON(status)
+			}
+
+			if token == nil {
+				status["authenticated"] = false
+				status["method"] = "token_file"
+				status["token_path"] = tokenManager.TokenPath()
+				status["message"] = "No token found. Use whoop_authorize to authenticate."
+				return resultFromJSON(status)
+			}
+
+			status["authenticated"] = true
+			status["method"] = "token_file"
+			status["token_path"] = tokenManager.TokenPath()
+
+			if !token.Expiry.IsZero() {
+				status["expires_at"] = token.Expiry.Format(time.RFC3339)
+				expiresIn := token.ExpiresIn()
+				if expiresIn > 0 {
+					status["expires_in"] = formatDuration(expiresIn)
+				} else {
+					status["expired"] = true
+					status["message"] = "Token expired. Will attempt auto-refresh on next API call."
+				}
+			}
+
+			return resultFromJSON(status)
+		},
+	)
+
+	// Authorize tool
+	s.AddTool(
+		mcp.NewTool("whoop_authorize",
+			mcp.WithDescription("Start the WHOOP OAuth authorization flow. Opens a browser for authentication and saves the token for future use. Requires WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET environment variables."),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			if clientID == "" || clientSecret == "" {
+				return resultFromJSON(map[string]interface{}{
+					"success": false,
+					"error":   "WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET environment variables are required",
+				})
+			}
+
+			if tokenManager == nil {
+				return resultFromJSON(map[string]interface{}{
+					"success": false,
+					"error":   "Token manager not initialized",
+				})
+			}
+
+			config := auth.OAuthConfig{
+				ClientID:     clientID,
+				ClientSecret: clientSecret,
+			}
+
+			result, err := auth.StartAuthFlow(ctx, config, tokenManager)
+			if err != nil {
+				return resultFromJSON(map[string]interface{}{
+					"success": false,
+					"error":   err.Error(),
+				})
+			}
+
+			return resultFromJSON(result)
+		},
+	)
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%d seconds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%.1f hours", d.Hours())
+	}
+	return fmt.Sprintf("%.1f days", d.Hours()/24)
 }
