@@ -55,7 +55,7 @@ func StartAuthFlow(ctx context.Context, config OAuthConfig, tokenManager *TokenM
 	if err != nil {
 		return nil, fmt.Errorf("starting callback server: %w", err)
 	}
-	defer server.Shutdown(context.Background())
+	defer func() { _ = server.Shutdown(context.Background()) }()
 
 	authURL := buildAuthURL(config, state)
 

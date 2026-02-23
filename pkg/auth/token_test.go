@@ -92,8 +92,8 @@ func TestTokenManagerLoadSave(t *testing.T) {
 		Expiry:       time.Now().Add(1 * time.Hour),
 	}
 
-	if err := tm.Save(testToken); err != nil {
-		t.Fatalf("Save() error = %v", err)
+	if saveErr := tm.Save(testToken); saveErr != nil {
+		t.Fatalf("Save() error = %v", saveErr)
 	}
 
 	// Verify file permissions
